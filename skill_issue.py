@@ -128,7 +128,7 @@ def skill_dirs(root: Path) -> list[tuple[str, Path]]:
         nested = [c for c in d.rglob("SKILL.md") if len(c.relative_to(d).parts) <= 3]
         if nested:
             for c in sorted(nested):
-                out.append((f"{d.name[:8]}…/{c.parent.name}", c.parent))
+                out.append((f"{d.name}/{c.parent.name}" if len(d.name) <= 12 else f"{d.name[:6]}…/{c.parent.name}", c.parent))
         else:
             out.append((d.name, d))
     return out
@@ -153,9 +153,14 @@ def first_line(p: Path, key="description") -> str:
         text = p.read_text(errors="replace")[:4000]
     except OSError:
         return ""
-    m = re.search(rf"^{key}:\s*(.+)$", text, re.M)
+    m = re.search(rf"^{key}:\s*(.*)$", text, re.M)
     if m:
-        return m.group(1).strip().strip('"')[:70]
+        val = m.group(1).strip().strip('"').strip("'")
+        if val in ("", ">", "|", ">-", "|-"):
+            rest = text[m.end():].splitlines()
+            val = " ".join(l.strip() for l in rest if l.startswith((" ", "\t")) and l.strip())[:200]
+        if val:
+            return val[:120]
     for line in text.splitlines():
         line = line.strip("# ").strip()
         if line and not line.startswith("---"):
@@ -714,20 +719,28 @@ def do_tui(items: list[Item]):
                             rows.append(("item", it))
             return rows
 
+        def layout(w):
+            """Column widths for the current terminal width."""
+            namew = 40 if w >= 110 else (34 if w >= 95 else max(18, w - 44))
+            return namew
+
         def draw(rows):
             nonlocal top
             scr.erase()
             h, w = scr.getmaxyx()
-            body = h - 3
+            body = h - 4
             if cursor < top:
                 top = cursor
             elif cursor >= top + body:
                 top = cursor - body + 1
+            namew = layout(w)
             sel_size = sum(i.size for i in selected)
             title = f" skill-issue  {len(selected)} selected, {human(sel_size)} "
             scr.addnstr(0, 0, title.ljust(w), w - 1, curses.A_BOLD | C(4))
-            for y, row in enumerate(rows[top:top + body], start=1):
-                is_cur = (top + y - 1) == cursor
+            header = f"     {'':3} {'NAME':<{namew}} │ {'SIZE':>7} │ {'AGE':>5} │ DESCRIPTION / FLAGS"
+            scr.addnstr(1, 0, header.ljust(w), w - 1, curses.A_DIM | curses.A_UNDERLINE)
+            for y, row in enumerate(rows[top:top + body], start=2):
+                is_cur = (top + y - 2) == cursor
                 attr = C(5) if is_cur else 0
                 if row[0] == "tool":
                     line = f"== {row[1].upper()}  ({human(row[2])})"
@@ -743,19 +756,29 @@ def do_tui(items: list[Item]):
                     scr.addnstr(y, 0, line.ljust(w), w - 1, attr | C(4))
                 else:
                     it = row[1]
-                    box = "[x]" if it in selected else ("[ ]" if it.cleanable else "   ")
-                    namew = max(20, w - 46)
-                    name = it.name if len(it.name) <= namew else "…" + it.name[-(namew - 1):]
-                    size = human(it.size) if it.kind != "config" else ""
+                    box = "[x]" if it in selected else ("[ ]" if it.cleanable else " · ")
+                    name = it.name if len(it.name) <= namew else it.name[:namew - 1] + "…"
+                    size = human(it.size) if it.kind != "config" else "-"
                     marks = list(it.flags)
                     if it.last_used:
                         marks.append(f"used {fmt_age(int((NOW - it.last_used) / 86400))} ago")
-                    left = f"     {box} {name:<{namew}}{size:>8} {fmt_age(it.age_days):>6}  "
-                    scr.addnstr(y, 0, left.ljust(w), w - 1, attr | (C(2) if it in selected else 0))
+                    elif _usage_scanned and it.tool == "claude" and it.category in ("skills", "agents", "mcp"):
+                        marks.append("never used")
+                    rowattr = attr | (C(2) if it in selected else 0)
+                    left = f"     {box} {name:<{namew}} │ {size:>7} │ {fmt_age(it.age_days):>5} │ "
+                    scr.addnstr(y, 0, left.ljust(w), w - 1, rowattr)
                     x = len(left)
-                    rest = (it.note[:40] + ("  " if it.note else "") + (("[" + ", ".join(marks) + "]") if marks else ""))
-                    if x < w - 1 and rest:
-                        scr.addnstr(y, x, rest, w - 1 - x, attr | (C(1) if marks else 0))
+                    avail = w - 1 - x
+                    if avail <= 0:
+                        continue
+                    flagtxt = ("[" + ", ".join(marks) + "]") if marks else ""
+                    descw = avail - (len(flagtxt) + 2 if flagtxt else 0)
+                    desc = it.note[:max(0, descw)]
+                    if desc:
+                        scr.addnstr(y, x, desc, avail, rowattr | (0 if is_cur else curses.A_DIM))
+                        x += len(desc) + 2
+                    if flagtxt and x < w - 1:
+                        scr.addnstr(y, x, flagtxt, w - 1 - x, rowattr | C(1) | curses.A_BOLD)
             help_ = "↑↓/jk move  space select  a all-in-category  enter fold  d delete selected  q quit"
             scr.addnstr(h - 2, 0, help_.ljust(w), w - 1, curses.A_DIM)
             scr.addnstr(h - 1, 0, status.ljust(w), w - 1, C(1))
@@ -824,9 +847,9 @@ def do_tui(items: list[Item]):
             elif k in (curses.KEY_UP, ord("k")):
                 cursor -= 1
             elif k == curses.KEY_NPAGE:
-                cursor += scr.getmaxyx()[0] - 4
+                cursor += scr.getmaxyx()[0] - 5
             elif k == curses.KEY_PPAGE:
-                cursor -= scr.getmaxyx()[0] - 4
+                cursor -= scr.getmaxyx()[0] - 5
             elif k == ord("g"):
                 cursor = 0
             elif k == ord("G"):
