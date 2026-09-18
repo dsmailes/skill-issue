@@ -495,9 +495,14 @@ USE_RE = re.compile(r'"name":"(Skill|Agent|Task|mcp__[^"]+)"|"skill":"([^"]+)"|"
 
 def usage_from_claude_transcripts() -> dict:
     """Return {('skills'|'agents'|'mcp', name): last_used_epoch} by grepping jsonl."""
+    global _usage_since
     last: dict = {}
     root = HOME / ".claude" / "projects"
-    for f in root.glob("*/*.jsonl"):
+    for f in root.rglob("*.jsonl"):
+        try:
+            _usage_since = min(_usage_since or NOW, f.stat().st_mtime)
+        except OSError:
+            pass
         try:
             with open(f, errors="replace") as fh:
                 for line in fh:
@@ -565,7 +570,7 @@ def print_report(items: list[Item], older_than: Optional[int], min_size: int):
                 if it.last_used:
                     marks.append(f"used {fmt_age(int((NOW - it.last_used) / 86400))} ago")
                 elif it.category in ("skills", "agents", "mcp") and it.tool == "claude" and _usage_scanned:
-                    marks.append("never used")
+                    marks.append("no use in window")
                 if stale:
                     marks.append("stale")
                 mark = ("  \033[33m[" + ", ".join(marks) + "]\033[0m") if marks else ""
@@ -574,9 +579,18 @@ def print_report(items: list[Item], older_than: Optional[int], min_size: int):
                 print(f"    {name:<45}{size:>8}  {fmt_age(it.age_days):>6}  {it.note[:60]}{mark}")
     print(f"\n\033[1mTotal on disk: {human(grand)}\033[0m")
     print("Report-only categories (edit the listed file to remove): mcp, hooks, instructions, projects.")
+    if _usage_scanned:
+        print("Note: " + usage_window())
 
 
 _usage_scanned = False
+_usage_since: Optional[float] = None
+
+
+def usage_window() -> str:
+    if not _usage_since:
+        return ""
+    return f"usage from transcripts back to {dt.date.fromtimestamp(_usage_since)} ({fmt_age(int((NOW - _usage_since) / 86400))}); older use is unknown"
 
 
 # --------------------------------------------------------------------------- clean
@@ -736,6 +750,8 @@ def do_tui(items: list[Item]):
             namew = layout(w)
             sel_size = sum(i.size for i in selected)
             title = f" skill-issue  {len(selected)} selected, {human(sel_size)} "
+            if _usage_scanned:
+                title += "   " + usage_window()
             scr.addnstr(0, 0, title.ljust(w), w - 1, curses.A_BOLD | C(4))
             header = f"     {'':3} {'NAME':<{namew}} │ {'SIZE':>7} │ {'AGE':>5} │ DESCRIPTION / FLAGS"
             scr.addnstr(1, 0, header.ljust(w), w - 1, curses.A_DIM | curses.A_UNDERLINE)
@@ -763,7 +779,7 @@ def do_tui(items: list[Item]):
                     if it.last_used:
                         marks.append(f"used {fmt_age(int((NOW - it.last_used) / 86400))} ago")
                     elif _usage_scanned and it.tool == "claude" and it.category in ("skills", "agents", "mcp"):
-                        marks.append("never used")
+                        marks.append("no use in window")
                     rowattr = attr | (C(2) if it in selected else 0)
                     left = f"     {box} {name:<{namew}} │ {size:>7} │ {fmt_age(it.age_days):>5} │ "
                     scr.addnstr(y, 0, left.ljust(w), w - 1, rowattr)
