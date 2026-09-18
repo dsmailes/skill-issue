@@ -4,19 +4,63 @@ DevCleaner for Xcode, but for AI coding agents. One script that audits what
 Claude Code, Codex, Gemini CLI, Cursor, Windsurf, OpenCode and Copilot have
 left on your Mac, and lets you move the dead weight to the Trash.
 
-No dependencies. Python 3.9+ (the one that ships with macOS).
+It finds skills, plugins, agents, slash commands, instruction files such as
+`CLAUDE.md` and `AGENTS.md`, MCP server configs, hooks, session transcripts
+and caches. It shows size, age and last use, flags anything broken or
+orphaned, and offers a terminal picker for clearing things out.
+
+> **Read the [disclaimer](#disclaimer) before cleaning anything.** This tool
+> moves files out of the folders your AI tools depend on. It is careful, but
+> it is not magic.
+
+## Requirements
+
+- macOS. Linux will mostly work but the Trash locations and some paths are
+  Mac-specific.
+- Python 3.9 or newer. The copy that ships with macOS and the Xcode Command
+  Line Tools is fine. There are no third-party dependencies.
+
+## Install
+
+Clone the repository and run the script directly:
 
 ```bash
-python3 skill_issue.py                       # full audit
-python3 skill_issue.py --tool codex          # one tool
-python3 skill_issue.py --category mcp        # one category
-python3 skill_issue.py --usage               # grep Claude transcripts for last use
-python3 skill_issue.py --older-than 60       # mark items untouched for 60 days
-python3 skill_issue.py --project ~/src/foo   # also inspect a project dir
-python3 skill_issue.py --json                # machine-readable
+git clone https://github.com/<you>/skill-issue.git
+cd skill-issue
+python3 skill_issue.py
 ```
 
-## What it finds
+To run it from anywhere as `skill-issue`, link it into a folder on your PATH:
+
+```bash
+chmod +x skill_issue.py
+ln -s "$(pwd)/skill_issue.py" /usr/local/bin/skill-issue
+```
+
+If `/usr/local/bin` doesn't exist or isn't writable, use `~/.local/bin` and
+make sure it is on your PATH.
+
+To uninstall, delete the symlink and the cloned folder. The tool keeps no
+state of its own outside the Trash folders it creates during a clean.
+
+## Usage
+
+### Audit
+
+```bash
+skill-issue                         # full report, grouped by tool and category
+skill-issue --tool codex            # one tool (repeatable)
+skill-issue --category mcp          # one category (repeatable)
+skill-issue --usage                 # add last-used info from Claude transcripts
+skill-issue --older-than 60         # mark items untouched for 60 days as stale
+skill-issue --min-size 1M           # hide unflagged items smaller than 1 MB
+skill-issue --project ~/src/foo     # also inspect a project directory
+skill-issue --json                  # machine-readable output
+```
+
+Tools: `claude`, `codex`, `gemini`, `cursor`, `windsurf`, `opencode`, `copilot`.
+
+Categories and what they cover:
 
 | Category | Examples |
 |---|---|
@@ -31,7 +75,7 @@ python3 skill_issue.py --json                # machine-readable
 | caches | sqlite logs, generated images, shell snapshots, file history, paste caches |
 | projects | every project Claude remembers, flagged when the directory is gone |
 
-## Flags
+Flags that can appear next to an item:
 
 - `broken-include`: an instruction file `@includes` a path that no longer exists
 - `missing-binary`: an MCP server's command isn't on PATH or at the given path
@@ -39,78 +83,116 @@ python3 skill_issue.py --json                # machine-readable
 - `disabled`: the server is present but switched off
 - `orphan`: a project entry whose directory no longer exists
 - `no-SKILL.md`: a skill directory with no manifest
-- `never used` / `used Nd ago`: from `--usage`, which greps Claude transcripts for Skill, Agent and MCP tool calls
+- `used Nd ago` / `no use in window`: from `--usage`, which reads Claude transcripts for Skill, Agent and MCP tool calls. Claude Code deletes transcripts after 30 days by default, so the report states how far back the evidence goes.
 - `stale`: older than `--older-than`
 
-## Interactive picker
+### Interactive picker
 
 ```bash
-python3 skill_issue.py tui
-python3 skill_issue.py tui --tool codex --usage
+skill-issue tui
+skill-issue tui --tool codex --usage
 ```
 
-A curses screen grouped by tool and category. Keys:
+A curses screen grouped by tool and category.
 
 | Key | Action |
 |---|---|
 | `↑` `↓` `j` `k` | move |
-| `space` | select / deselect an item, or every item in a category |
-| `a` | select / deselect everything in the current category |
-| `enter` | fold / unfold a category |
+| `space` | select or deselect an item, or every item in a category |
+| `a` | select or deselect everything in the current category |
+| `enter` | fold or unfold a category |
 | `d` | review and move the selection to Trash |
 | `q` | quit |
 
 Report-only categories (mcp, hooks, instructions, projects) are folded and
-cannot be selected; pressing space on one tells you which file to edit.
-Pressing `d` shows a confirmation screen that lists every item and the
-warnings that apply, for example transcripts that will lose resume history,
-sqlite files that need the app closed first, skills used in the last 30 days,
-or synced skills that will come back on the next sync. Nothing moves until you
+cannot be selected. Pressing space on one tells you which file to edit.
+Pressing `d` shows a confirmation screen listing every item and the warnings
+that apply, for example transcripts that will lose resume history, sqlite
+files that need the app closed first, skills used in the last 30 days, or
+synced skills that will come back on the next sync. Nothing moves until you
 press `y`.
 
-## Cleaning from the command line
+### Cleaning from the command line
 
 ```bash
-python3 skill_issue.py clean sessions --tool codex --older-than 90
-python3 skill_issue.py clean skills --tool claude            # interactive pick list
-python3 skill_issue.py clean caches --name generated_images -y
-python3 skill_issue.py clean sessions --tool codex --name 'sessions/2026/0[3-6]' -y
-python3 skill_issue.py restore ~/.Trash/skill-issue-20260918-130501
+skill-issue clean sessions --tool codex --older-than 90
+skill-issue clean skills --tool claude                        # interactive pick list
+skill-issue clean caches --name generated_images -y
+skill-issue clean sessions --tool codex --name 'sessions/2026/0[3-6]' -y
+skill-issue restore ~/.Trash/skill-issue-20260918-130501
 ```
 
 Only file-backed categories can be cleaned: `skills plugins agents commands
-sessions caches`. Nothing is hard-deleted and nothing is copied. Each item is
-renamed into a `skill-issue-<timestamp>/` folder in the Trash of the volume it
-lives on (`~/.Trash`, or `/Volumes/<disk>/.Trashes/<uid>` for an external
-drive), with a `manifest.json`. `restore` renames them back. A move that
-would have to cross volumes is refused rather than copied and deleted.
+sessions caches`. `--name` matches an item name or its last path segment
+exactly, with `*` and `?` globs allowed. `--yes` needs at least one of
+`--tool`, `--older-than` or `--name`, so a stray command can't empty a whole
+category unattended. The command-line path prints the same warnings as the
+picker's confirmation screen.
 
-`clean --yes` needs at least one of `--tool`, `--older-than` or `--name`, so
-a stray command can't empty a whole category unattended. The command-line
-path prints the same warnings as the TUI's confirmation screen.
+### How cleaning works
+
+Nothing is hard-deleted and nothing is copied. Each item is renamed into a
+`skill-issue-<timestamp>/` folder in the Trash of the volume it lives on:
+`~/.Trash` for the boot volume, or `/Volumes/<disk>/.Trashes/<uid>` for an
+external drive. A `manifest.json` in that folder records where everything
+came from, and `restore` renames it all back. A move that would have to cross
+volumes is refused rather than copied and deleted. The restore path is
+printed after every clean; keep it, because macOS does not let the terminal
+list an external drive's `.Trashes` folder.
+
+MCP servers, hooks, instruction files and project entries are report-only.
+Removing those means editing a config file that other things depend on, so
+the report tells you which file to open instead.
+
+## Disclaimer
+
+This tool moves files out of the configuration and cache directories of
+third-party software. Before you clean anything, understand what you are
+agreeing to:
+
+- **You are responsible for what you select.** The tool shows sizes, ages,
+  descriptions and warnings to help you decide. It does not know which of
+  your skills, sessions or caches matter to you.
+- **Session transcripts are conversation history.** Removing them means the
+  agent can no longer resume or search those conversations. Some tools also
+  keep undo history for file edits in their cache folders.
+- **Quit the app first.** Codex keeps sqlite databases open while it runs.
+  Moving an open database can corrupt it. The same caution applies to any
+  agent that is running while you clean.
+- **Synced content may come back.** Skills synced from claude.ai will
+  re-download on the next sync. Plugin marketplaces and caches will re-fetch.
+- **Trash is not a backup.** Emptying the Trash makes the move permanent.
+  Restore first if you change your mind.
+- **Paths change.** The agent vendors move files and formats between
+  releases. The tool reads known locations as of September 2026 and may
+  miss, or misclassify, newer ones.
+- **No warranty.** This is provided as-is under the MIT License. The author
+  accepts no liability for lost data, broken tool installations, or anything
+  else that follows from using it. Test on a machine you can afford to
+  restore.
+
+This project is not affiliated with or endorsed by Anthropic, OpenAI,
+Google, Cursor, Codeium, or any other vendor whose files it reads.
 
 ## Safety notes
 
 - The tool never executes anything. MCP commands are checked for existence
-  only, and there is no subprocess or shell call in the script.
+  only. There is no subprocess or shell call in the script.
 - Everything read from disk is treated as untrusted. Reads are capped at 4 MB
   and only regular files are opened, so an `@include` pointing at a device or
   FIFO can't hang it. Symlinks are followed only when they resolve inside
-  your home directory, which keeps dotfile-manager setups working without
-  letting a config file point the tool at arbitrary files. The `--usage`
-  transcript scan reads newest files first and stops after 2 GB. Names and descriptions have control and escape bytes
+  your home directory. The `--usage` transcript scan reads newest files first
+  and stops after 2 GB. Names and descriptions have control and escape bytes
   stripped before display, so a downloaded skill can't rewrite the report.
 - `restore` only accepts manifest entries whose source is inside the given
   Trash folder and whose destination doesn't already exist. From `~/.Trash`
-  the destination must be inside your home; from an external volume's
+  the destination must be inside your home. From an external volume's
   `.Trashes` it must be on that volume.
 - URLs in MCP notes are reduced to scheme and host, so credentials in
   userinfo, paths, query strings or fragments don't end up in pasted reports.
 - Each clean gets a Trash folder that did not exist before, so two cleans in
   the same second can't overwrite each other's manifest.
 
-MCP servers, hooks, instruction files and project entries are report-only.
-Removing those means editing a config file that other things depend on, so the
-report tells you which file to open instead.
+## License
 
-Quit Codex before cleaning its sqlite files. They're locked while it runs.
+[MIT](LICENSE). Copyright (c) 2026 David John Smailes.
