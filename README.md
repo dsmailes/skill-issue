@@ -94,14 +94,19 @@ path prints the same warnings as the TUI's confirmation screen.
   only, and there is no subprocess or shell call in the script.
 - Everything read from disk is treated as untrusted. Reads are capped at 4 MB
   and only regular files are opened, so an `@include` pointing at a device or
-  FIFO can't hang it. Names and descriptions have control and escape bytes
+  FIFO can't hang it. Symlinks are followed only when they resolve inside
+  your home directory, which keeps dotfile-manager setups working without
+  letting a config file point the tool at arbitrary files. The `--usage`
+  transcript scan reads newest files first and stops after 2 GB. Names and descriptions have control and escape bytes
   stripped before display, so a downloaded skill can't rewrite the report.
 - `restore` only accepts manifest entries whose source is inside the given
   Trash folder and whose destination doesn't already exist. From `~/.Trash`
   the destination must be inside your home; from an external volume's
   `.Trashes` it must be on that volume.
-- URLs in MCP notes have their query strings redacted so tokens don't end up
-  in pasted reports.
+- URLs in MCP notes are reduced to scheme and host, so credentials in
+  userinfo, paths, query strings or fragments don't end up in pasted reports.
+- Each clean gets a Trash folder that did not exist before, so two cleans in
+  the same second can't overwrite each other's manifest.
 
 MCP servers, hooks, instruction files and project entries are report-only.
 Removing those means editing a config file that other things depend on, so the

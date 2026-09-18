@@ -148,14 +148,34 @@ def children(p: Path, pattern="*") -> list[Path]:
 READ_LIMIT = 4 << 20   # never read more than 4 MB of any config/instruction file
 
 
-def safe_read(p: Path, limit: int = READ_LIMIT) -> str:
-    """Read up to `limit` bytes of a regular file. Devices, FIFOs and sockets
-    (which an untrusted `@include` could point at) are skipped, so the tool
-    cannot be made to hang or balloon in memory by hostile config."""
+def readable_target(p: Path) -> Optional[Path]:
+    """Resolve `p` for reading, or None if it must not be read.
+    Symlinks are followed only when the final target is inside HOME, so a
+    hostile `@include` or config symlink cannot point the tool at arbitrary
+    files. Devices, FIFOs and sockets are refused."""
     try:
-        if not p.is_file():
-            return ""
-        with open(p, "r", errors="replace") as fh:
+        if p.is_symlink():
+            real = p.resolve()
+            home = HOME.resolve()
+            if not (real == home or home in real.parents):
+                return None
+            p = real
+        st = p.stat()
+        import stat as _stat
+        if not _stat.S_ISREG(st.st_mode):
+            return None
+        return p
+    except OSError:
+        return None
+
+
+def safe_read(p: Path, limit: int = READ_LIMIT) -> str:
+    """Read up to `limit` bytes of a regular file (see readable_target)."""
+    target = readable_target(p)
+    if target is None:
+        return ""
+    try:
+        with open(target, "r", errors="replace") as fh:
             return fh.read(limit)
     except OSError:
         return ""
@@ -258,8 +278,8 @@ def mcp_items_from_dict(tool: str, servers: dict, source: Path, scope: str, item
         if not isinstance(cfg, dict):
             continue
         cmd = cfg.get("command") or cfg.get("url") or cfg.get("httpUrl") or ""
-        if "://" in str(cmd):
-            cmd = re.sub(r"\?.*$", "?…", str(cmd))      # never surface tokens in query strings
+        if "://" in str(cmd):                            # never surface userinfo, paths or tokens
+            cmd = re.sub(r"^(\w+://)(?:[^@/\s]*@)?([^/\s?#]+).*$", r"\1\2/…", str(cmd))
         flags, note = [], f"{scope}: {cmd}"
         if cfg.get("disabled") or cfg.get("enabled") is False:
             flags.append("disabled")
@@ -519,14 +539,22 @@ USE_RE = re.compile(r'"name":"(Skill|Agent|Task|mcp__[^"]+)"|"skill":"([^"]+)"|"
 
 def usage_from_claude_transcripts() -> dict:
     """Return {('skills'|'agents'|'mcp', name): last_used_epoch} by grepping jsonl."""
-    global _usage_since
+    global _usage_since, _usage_truncated
     last: dict = {}
     root = HOME / ".claude" / "projects"
-    for f in root.rglob("*.jsonl"):
+    budget = USAGE_BUDGET
+    for f in sorted(root.rglob("*.jsonl"), key=lambda x: -x.stat().st_mtime if x.exists() else 0):
+        if f.is_symlink() or readable_target(f) is None:
+            continue
         try:
-            _usage_since = min(_usage_since or NOW, f.stat().st_mtime)
+            st = f.stat()
         except OSError:
-            pass
+            continue
+        if budget <= 0:
+            _usage_truncated = True
+            break
+        _usage_since = min(_usage_since or NOW, st.st_mtime)
+        budget -= st.st_size
         try:
             with open(f, errors="replace") as fh:
                 for line in fh:
@@ -609,12 +637,17 @@ def print_report(items: list[Item], older_than: Optional[int], min_size: int):
 
 _usage_scanned = False
 _usage_since: Optional[float] = None
+_usage_truncated = False
+USAGE_BUDGET = 2 << 30   # stop scanning transcripts after 2 GB, newest first
 
 
 def usage_window() -> str:
     if not _usage_since:
         return ""
-    return f"usage from transcripts back to {dt.date.fromtimestamp(_usage_since)} ({fmt_age(int((NOW - _usage_since) / 86400))}); older use is unknown"
+    msg = f"usage from transcripts back to {dt.date.fromtimestamp(_usage_since)} ({fmt_age(int((NOW - _usage_since) / 86400))}); older use is unknown"
+    if _usage_truncated:
+        msg += f"; scan stopped at {human(USAGE_BUDGET)} of transcripts"
+    return msg
 
 
 # --------------------------------------------------------------------------- trash
@@ -648,6 +681,23 @@ def move_to_trash(chosen: list) -> tuple[list[dict], list[str], list[Path]]:
     stamp = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
     manifests: dict = {}
     failed: list[str] = []
+    roots_made: dict = {}
+
+    def fresh_root(trash: Path) -> Path:
+        """One new, never-existing folder per trash location per call, so a
+        second clean in the same second can't overwrite an earlier manifest."""
+        if trash in roots_made:
+            return roots_made[trash]
+        n = 0
+        while True:
+            cand = trash / (f"skill-issue-{stamp}" + (f"-{n}" if n else ""))
+            try:
+                cand.mkdir(exist_ok=False)
+                roots_made[trash] = cand
+                return cand
+            except FileExistsError:
+                n += 1
+
     for it in chosen:
         src = Path(it.path)
         if not src.exists() and not src.is_symlink():
@@ -657,7 +707,7 @@ def move_to_trash(chosen: list) -> tuple[list[dict], list[str], list[Path]]:
         if root is None:
             failed.append(f"{src}: no Trash on that volume")
             continue
-        dest_root = root / f"skill-issue-{stamp}"
+        dest_root = fresh_root(root)
         dest = unique_dest(dest_root / it.tool / it.category / src.name)
         try:
             os.rename(src, dest)
