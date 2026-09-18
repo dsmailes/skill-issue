@@ -78,9 +78,30 @@ python3 skill_issue.py restore ~/.Trash/skill-issue-20260918-130501
 ```
 
 Only file-backed categories can be cleaned: `skills plugins agents commands
-sessions caches`. Nothing is hard-deleted. Items move to
-`~/.Trash/skill-issue-<timestamp>/` with a `manifest.json`, and `restore`
-puts them back.
+sessions caches`. Nothing is hard-deleted and nothing is copied. Each item is
+renamed into a `skill-issue-<timestamp>/` folder in the Trash of the volume it
+lives on (`~/.Trash`, or `/Volumes/<disk>/.Trashes/<uid>` for an external
+drive), with a `manifest.json`. `restore` renames them back. A move that
+would have to cross volumes is refused rather than copied and deleted.
+
+`clean --yes` needs at least one of `--tool`, `--older-than` or `--name`, so
+a stray command can't empty a whole category unattended. The command-line
+path prints the same warnings as the TUI's confirmation screen.
+
+## Safety notes
+
+- The tool never executes anything. MCP commands are checked for existence
+  only, and there is no subprocess or shell call in the script.
+- Everything read from disk is treated as untrusted. Reads are capped at 4 MB
+  and only regular files are opened, so an `@include` pointing at a device or
+  FIFO can't hang it. Names and descriptions have control and escape bytes
+  stripped before display, so a downloaded skill can't rewrite the report.
+- `restore` only accepts manifest entries whose source is inside the given
+  Trash folder and whose destination doesn't already exist. From `~/.Trash`
+  the destination must be inside your home; from an external volume's
+  `.Trashes` it must be on that volume.
+- URLs in MCP notes have their query strings redacted so tokens don't end up
+  in pasted reports.
 
 MCP servers, hooks, instruction files and project entries are report-only.
 Removing those means editing a config file that other things depend on, so the

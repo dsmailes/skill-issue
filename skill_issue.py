@@ -60,6 +60,11 @@ class Item:
     flags: list = field(default_factory=list)   # e.g. ["orphan", "broken-include"]
     last_used: Optional[float] = None
 
+    def __post_init__(self):
+        self.name = clean_text(self.name)
+        self.note = clean_text(self.note)
+        self.flags = [clean_text(f) for f in self.flags]
+
     @property
     def age_days(self) -> int:
         return int((NOW - self.mtime) / 86400) if self.mtime else -1
@@ -140,18 +145,41 @@ def children(p: Path, pattern="*") -> list[Path]:
     return sorted(c for c in p.glob(pattern) if not c.name.startswith("."))
 
 
+READ_LIMIT = 4 << 20   # never read more than 4 MB of any config/instruction file
+
+
+def safe_read(p: Path, limit: int = READ_LIMIT) -> str:
+    """Read up to `limit` bytes of a regular file. Devices, FIFOs and sockets
+    (which an untrusted `@include` could point at) are skipped, so the tool
+    cannot be made to hang or balloon in memory by hostile config."""
+    try:
+        if not p.is_file():
+            return ""
+        with open(p, "r", errors="replace") as fh:
+            return fh.read(limit)
+    except OSError:
+        return ""
+
+
+CONTROL_RE = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")
+
+
+def clean_text(v: str) -> str:
+    """Strip terminal control/escape bytes from text that came from disk."""
+    return CONTROL_RE.sub("", v.replace("\t", " ").replace("\n", " ").replace("\r", " "))
+
+
 def read_json(p: Path) -> dict:
     try:
-        return json.loads(p.read_text())
-    except (OSError, ValueError):
+        return json.loads(safe_read(p) or "{}")
+    except ValueError:
         return {}
 
 
 def first_line(p: Path, key="description") -> str:
     """Pull `description:` from YAML frontmatter or the first heading/line."""
-    try:
-        text = p.read_text(errors="replace")[:4000]
-    except OSError:
+    text = safe_read(p, 4000)
+    if not text:
         return ""
     m = re.search(rf"^{key}:\s*(.*)$", text, re.M)
     if m:
@@ -200,10 +228,7 @@ def scan_instruction_file(tool: str, path: Path, seen: set, items: list, depth=0
     if depth:
         it.note = f"included (depth {depth}): " + it.note
     items.append(it)
-    try:
-        text = strip_fences(path.read_text(errors="replace"))
-    except OSError:
-        return
+    text = strip_fences(safe_read(path))
     for m in INCLUDE_RE.finditer(text):
         target = m.group(1)
         if target.startswith(("http://", "https://")):
@@ -233,6 +258,8 @@ def mcp_items_from_dict(tool: str, servers: dict, source: Path, scope: str, item
         if not isinstance(cfg, dict):
             continue
         cmd = cfg.get("command") or cfg.get("url") or cfg.get("httpUrl") or ""
+        if "://" in str(cmd):
+            cmd = re.sub(r"\?.*$", "?…", str(cmd))      # never surface tokens in query strings
         flags, note = [], f"{scope}: {cmd}"
         if cfg.get("disabled") or cfg.get("enabled") is False:
             flags.append("disabled")
@@ -255,10 +282,7 @@ TOML_KV = re.compile(r'^\s*(\w+)\s*=\s*"([^"]*)"', re.M)
 
 def parse_codex_toml_mcp(p: Path) -> dict:
     """Minimal parser for [mcp_servers.NAME] tables (py3.9 has no tomllib)."""
-    try:
-        text = p.read_text(errors="replace")
-    except OSError:
-        return {}
+    text = safe_read(p)
     out = {}
     matches = list(TOML_SECTION.finditer(text))
     for i, m in enumerate(matches):
@@ -593,7 +617,59 @@ def usage_window() -> str:
     return f"usage from transcripts back to {dt.date.fromtimestamp(_usage_since)} ({fmt_age(int((NOW - _usage_since) / 86400))}); older use is unknown"
 
 
-# --------------------------------------------------------------------------- clean
+# --------------------------------------------------------------------------- trash
+def mount_point(p: Path) -> Path:
+    p = p.resolve()
+    dev = p.stat().st_dev
+    while p.parent != p and p.parent.stat().st_dev == dev:
+        p = p.parent
+    return p
+
+
+def trash_root_for(path: Path) -> Optional[Path]:
+    """The Trash folder on the same volume as `path`, so moves are pure renames.
+    Returns None when no usable trash exists on that volume."""
+    home_trash = HOME / ".Trash"
+    try:
+        if home_trash.exists() and path.stat().st_dev == home_trash.stat().st_dev:
+            return home_trash
+        vol = mount_point(path)
+        t = vol / ".Trashes" / str(os.getuid())
+        t.mkdir(parents=True, exist_ok=True)
+        return t
+    except OSError:
+        return None
+
+
+def move_to_trash(chosen: list) -> tuple[list[dict], list[str], list[Path]]:
+    """Rename each item into a timestamped folder in its own volume's Trash.
+    Never copies across volumes (a failed copy+delete could lose data).
+    Returns (manifest entries, failures, trash folders written)."""
+    stamp = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
+    manifests: dict = {}
+    failed: list[str] = []
+    for it in chosen:
+        src = Path(it.path)
+        if not src.exists() and not src.is_symlink():
+            failed.append(f"{src}: no longer exists")
+            continue
+        root = trash_root_for(src)
+        if root is None:
+            failed.append(f"{src}: no Trash on that volume")
+            continue
+        dest_root = root / f"skill-issue-{stamp}"
+        dest = unique_dest(dest_root / it.tool / it.category / src.name)
+        try:
+            os.rename(src, dest)
+        except OSError as e:
+            failed.append(f"{src}: {e.strerror or e}")
+            continue
+        manifests.setdefault(dest_root, []).append({"from": str(src), "to": str(dest), "size": it.size})
+    for dest_root, entries in manifests.items():
+        (dest_root / "manifest.json").write_text(json.dumps(entries, indent=2))
+    return [e for v in manifests.values() for e in v], failed, list(manifests)
+
+
 def unique_dest(dest: Path) -> Path:
     """Avoid nesting a moved dir inside an existing one of the same name."""
     dest.parent.mkdir(parents=True, exist_ok=True)
@@ -615,11 +691,23 @@ def do_clean(items: list[Item], category: str, tool: Optional[str], older_than: 
     if not cands:
         print("Nothing matches.")
         return
+    if yes and tool is None and older_than is None and not names:
+        sys.exit("Refusing --yes without a filter (--tool, --older-than or --name): that would move every "
+                 f"{category} item for every tool.")
     cands.sort(key=lambda i: -i.size)
     print(f"\nCandidates ({category}):")
     for n, it in enumerate(cands, 1):
         print(f"  {n:>3}. {it.tool:<9}{it.name:<45}{human(it.size):>8}  {fmt_age(it.age_days):>6}  {it.path}")
     print(f"       total {human(sum(i.size for i in cands))}")
+    warn: dict = {}
+    for it in cands:
+        for wtext in warnings_for(it):
+            warn.setdefault(wtext, 0)
+            warn[wtext] += 1
+    if warn:
+        print("\nWarnings:")
+        for wtext, n in warn.items():
+            print(f"  ! {wtext}  ({n} item{'s' if n > 1 else ''})")
     if not yes:
         sel = input("\nMove which to Trash? [all / 1,3,5 / q]: ").strip().lower()
         if sel in ("", "q", "n"):
@@ -631,35 +719,68 @@ def do_clean(items: list[Item], category: str, tool: Optional[str], older_than: 
             except ValueError:
                 sys.exit("Bad selection.")
             cands = [it for n, it in enumerate(cands, 1) if n in idx]
-    stamp = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
-    dest_root = HOME / ".Trash" / f"skill-issue-{stamp}"
-    dest_root.mkdir(parents=True, exist_ok=True)
-    manifest = []
-    for it in cands:
-        src = Path(it.path)
-        dest = unique_dest(dest_root / it.tool / it.category / src.name)
-        try:
-            shutil.move(str(src), str(dest))
-            manifest.append({"from": str(src), "to": str(dest), "size": it.size})
-            print(f"  moved  {src}")
-        except OSError as e:
-            print(f"  FAILED {src}: {e}")
-    (dest_root / "manifest.json").write_text(json.dumps(manifest, indent=2))
-    print(f"\nMoved {len(manifest)} item(s), {human(sum(m['size'] for m in manifest))}, to {dest_root}")
-    print("Restore with:  skill_issue.py restore " + str(dest_root))
+    manifest, failed, roots = move_to_trash(cands)
+    for m in manifest:
+        print(f"  moved  {m['from']}")
+    for f in failed:
+        print(f"  FAILED {f}")
+    print(f"\nMoved {len(manifest)} item(s), {human(sum(m['size'] for m in manifest))}")
+    for r in roots:
+        print("Restore with:  skill_issue.py restore " + str(r))
+
+
+def restore_allowed(dst: Path, trash_dir: Path) -> Optional[str]:
+    """Why a manifest entry may not be restored, or None if it is fine."""
+    if dst.exists() or dst.is_symlink():
+        return "destination already exists"
+    # Restores from ~/.Trash may only land inside home. Restores from an
+    # external volume's .Trashes may land anywhere on that volume.
+    try:
+        home = HOME.resolve()
+        allowed = [home]
+        if not (trash_dir == home or home in trash_dir.parents):
+            allowed.append(mount_point(trash_dir))
+    except OSError:
+        return "cannot resolve trash volume"
+    parent = dst.parent
+    while not parent.exists() and parent.parent != parent:
+        parent = parent.parent
+    real = parent.resolve()
+    if not any(real == a or a in real.parents for a in allowed):
+        return "destination outside home and the trash volume"
+    return None
 
 
 def do_restore(trash_dir: Path):
+    trash_dir = trash_dir.resolve()
     manifest = read_json(trash_dir / "manifest.json")
-    if not manifest:
+    if not isinstance(manifest, list) or not manifest:
         sys.exit("No manifest found.")
     for m in manifest:
+        if not isinstance(m, dict) or not isinstance(m.get("to"), str) or not isinstance(m.get("from"), str):
+            print("  skipped malformed entry")
+            continue
         src, dst = Path(m["to"]), Path(m["from"])
-        if not src.exists():
+        try:
+            inside = trash_dir == src.resolve() or trash_dir in src.resolve().parents
+        except OSError:
+            inside = False
+        if not inside:
+            print(f"  refused {src}: not inside {trash_dir}")
+            continue
+        if not src.exists() and not src.is_symlink():
             print(f"  missing {src}")
             continue
+        why = restore_allowed(dst, trash_dir)
+        if why:
+            print(f"  refused {dst}: {why}")
+            continue
         dst.parent.mkdir(parents=True, exist_ok=True)
-        shutil.move(str(src), str(dst))
+        try:
+            os.rename(src, dst)
+        except OSError as e:
+            print(f"  FAILED {dst}: {e.strerror or e}")
+            continue
         print(f"  restored {dst}")
 
 
@@ -824,31 +945,21 @@ def do_tui(items: list[Item]):
                     break
                 nm = it.name if len(it.name) <= 40 else "…" + it.name[-39:]
                 scr.addnstr(y, 0, f"  {it.tool:<9}{nm:<40} {human(it.size):>8}  {it.path}", w - 1); y += 1
-            scr.addnstr(h - 2, 0, "Nothing is hard-deleted; a manifest lets you restore. Press y to confirm, any other key to cancel.".ljust(w), w - 1, curses.A_DIM)
+            scr.addnstr(h - 2, 0, "Renamed into this volume's Trash with a manifest for restore. Press y to confirm, any other key to cancel.".ljust(w), w - 1, curses.A_DIM)
             scr.refresh()
             return scr.getch() in (ord("y"), ord("Y"))
 
         def perform(chosen: list[Item]):
-            stamp = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
-            dest_root = HOME / ".Trash" / f"skill-issue-{stamp}"
-            dest_root.mkdir(parents=True, exist_ok=True)
-            manifest, failed = [], []
+            manifest, failed, roots = move_to_trash(chosen)
+            moved_paths = {m["from"] for m in manifest}
             for it in chosen:
-                src = Path(it.path)
-                dest = unique_dest(dest_root / it.tool / it.category / src.name)
-                try:
-                    shutil.move(str(src), str(dest))
-                    manifest.append({"from": str(src), "to": str(dest), "size": it.size})
-                except OSError as e:
-                    failed.append(f"{src}: {e}")
-            (dest_root / "manifest.json").write_text(json.dumps(manifest, indent=2))
-            for it in chosen:
-                if not Path(it.path).exists():
+                if it.path in moved_paths:
                     for cat in by_tool[it.tool].values():
                         if it in cat:
                             cat.remove(it)
             moved = human(sum(m["size"] for m in manifest))
-            return f"Moved {len(manifest)} item(s), {moved}, to {dest_root}" + (f"  FAILED: {len(failed)}" if failed else ""), failed
+            where = ", ".join(str(r) for r in roots) if roots else "nowhere"
+            return f"Moved {len(manifest)} item(s), {moved}, to {where}" + (f"  FAILED: {len(failed)} ({failed[0]})" if failed else ""), failed
 
         rows = build_rows()
         while True:
