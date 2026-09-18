@@ -8,6 +8,7 @@ Gemini CLI, Cursor, Windsurf, OpenCode and Copilot.
 
 Usage:
   skill_issue.py                      full audit
+  skill_issue.py tui                  interactive picker (curses)
   skill_issue.py --tool claude        one tool
   skill_issue.py --category sessions  one category
   skill_issue.py --usage              also grep Claude transcripts for last use
@@ -46,7 +47,7 @@ CLEANABLE = {"skills", "plugins", "agents", "commands", "sessions", "caches"}
 
 
 # --------------------------------------------------------------------------- model
-@dataclass
+@dataclass(eq=False)
 class Item:
     tool: str
     category: str
@@ -185,6 +186,8 @@ def scan_instruction_file(tool: str, path: Path, seen: set, items: list, depth=0
     seen.add(str(path))
     name = name or path.name
     if not path.exists():
+        if depth == 0:
+            return
         items.append(Item(tool, "instructions", name, str(path), 0, 0, "file",
                           "include target missing", ["broken-include"]))
         return
@@ -572,6 +575,16 @@ _usage_scanned = False
 
 
 # --------------------------------------------------------------------------- clean
+def unique_dest(dest: Path) -> Path:
+    """Avoid nesting a moved dir inside an existing one of the same name."""
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    cand, n = dest, 1
+    while cand.exists():
+        n += 1
+        cand = dest.with_name(f"{dest.name}~{n}")
+    return cand
+
+
 def do_clean(items: list[Item], category: str, tool: Optional[str], older_than: Optional[int],
              names: list[str], yes: bool):
     if category not in CLEANABLE:
@@ -605,8 +618,7 @@ def do_clean(items: list[Item], category: str, tool: Optional[str], older_than: 
     manifest = []
     for it in cands:
         src = Path(it.path)
-        dest = dest_root / it.tool / it.category / src.name
-        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest = unique_dest(dest_root / it.tool / it.category / src.name)
         try:
             shutil.move(str(src), str(dest))
             manifest.append({"from": str(src), "to": str(dest), "size": it.size})
@@ -631,6 +643,242 @@ def do_restore(trash_dir: Path):
         shutil.move(str(src), str(dst))
         print(f"  restored {dst}")
 
+
+
+# --------------------------------------------------------------------------- warnings
+def warnings_for(it: Item) -> list[str]:
+    """Human-readable cautions shown before an item is moved to Trash."""
+    w = []
+    if it.category == "sessions":
+        w.append("session transcripts: resume/history for these conversations will be lost")
+    if it.category == "caches" and ".sqlite" in it.name:
+        w.append("sqlite database: quit " + it.tool.title() + " first, it is locked while running")
+    if it.category == "caches" and it.name in ("file-history", "backups"):
+        w.append("file-history/backups: used to undo agent edits")
+    if it.category in ("skills", "agents", "commands"):
+        w.append(f"{it.category[:-1]} will be unavailable in every project")
+        if "synced" in it.path:
+            w.append("synced from claude.ai: it will probably come back on the next sync")
+        if it.last_used and (NOW - it.last_used) < 30 * 86400:
+            w.append("used within the last 30 days")
+    if it.category == "plugins":
+        if "marketplaces" in it.name or "cache" in it.name:
+            w.append("plugin cache/marketplace: installed plugins may break until re-synced")
+        else:
+            w.append("plugin will be removed")
+    if it.mtime and it.age_days < 7:
+        w.append("modified within the last 7 days")
+    if "orphan?" in it.flags:
+        w.append("project dir not in ~/.claude.json (may be orphaned, or just opened elsewhere)")
+    return w
+
+
+# --------------------------------------------------------------------------- TUI
+def do_tui(items: list[Item]):
+    import curses
+
+    def run(scr):
+        curses.curs_set(0)
+        curses.use_default_colors()
+        has_color = curses.has_colors()
+        if has_color:
+            curses.init_pair(1, curses.COLOR_YELLOW, -1)   # flags / warnings
+            curses.init_pair(2, curses.COLOR_GREEN, -1)    # selected
+            curses.init_pair(3, curses.COLOR_RED, -1)      # danger
+            curses.init_pair(4, curses.COLOR_CYAN, -1)     # headers
+            curses.init_pair(5, curses.COLOR_BLACK, curses.COLOR_WHITE)  # cursor bar
+        C = (lambda n: curses.color_pair(n)) if has_color else (lambda n: 0)
+
+        # rows: ("tool", name) | ("cat", tool, cat, [items]) | ("item", Item)
+        by_tool: dict = {}
+        for it in items:
+            by_tool.setdefault(it.tool, {}).setdefault(it.category, []).append(it)
+        collapsed = {(t, c) for t in by_tool for c in by_tool[t] if c not in CLEANABLE}
+        selected: set = set()
+        cursor, top = 0, 0
+        status = ""
+
+        def build_rows():
+            rows = []
+            for tool in sorted(by_tool):
+                tsize = sum(i.size for c in by_tool[tool].values() for i in c)
+                rows.append(("tool", tool, tsize))
+                for cat in CATEGORIES:
+                    its = by_tool[tool].get(cat)
+                    if not its:
+                        continue
+                    its.sort(key=lambda i: -i.size)
+                    rows.append(("cat", tool, cat, its))
+                    if (tool, cat) not in collapsed:
+                        for it in its:
+                            rows.append(("item", it))
+            return rows
+
+        def draw(rows):
+            nonlocal top
+            scr.erase()
+            h, w = scr.getmaxyx()
+            body = h - 3
+            if cursor < top:
+                top = cursor
+            elif cursor >= top + body:
+                top = cursor - body + 1
+            sel_size = sum(i.size for i in selected)
+            title = f" skill-issue  {len(selected)} selected, {human(sel_size)} "
+            scr.addnstr(0, 0, title.ljust(w), w - 1, curses.A_BOLD | C(4))
+            for y, row in enumerate(rows[top:top + body], start=1):
+                is_cur = (top + y - 1) == cursor
+                attr = C(5) if is_cur else 0
+                if row[0] == "tool":
+                    line = f"== {row[1].upper()}  ({human(row[2])})"
+                    scr.addnstr(y, 0, line.ljust(w), w - 1, attr | curses.A_BOLD)
+                elif row[0] == "cat":
+                    _, tool, cat, its = row
+                    n_sel = sum(1 for i in its if i in selected)
+                    mark = "▸" if (tool, cat) in collapsed else "▾"
+                    tag = "" if cat in CLEANABLE else "   (report-only)"
+                    line = f"  {mark} {cat:<13}{len(its):>4} items  {human(sum(i.size for i in its)):>8}{tag}"
+                    if n_sel:
+                        line += f"   [{n_sel} selected]"
+                    scr.addnstr(y, 0, line.ljust(w), w - 1, attr | C(4))
+                else:
+                    it = row[1]
+                    box = "[x]" if it in selected else ("[ ]" if it.cleanable else "   ")
+                    namew = max(20, w - 46)
+                    name = it.name if len(it.name) <= namew else "…" + it.name[-(namew - 1):]
+                    size = human(it.size) if it.kind != "config" else ""
+                    marks = list(it.flags)
+                    if it.last_used:
+                        marks.append(f"used {fmt_age(int((NOW - it.last_used) / 86400))} ago")
+                    left = f"     {box} {name:<{namew}}{size:>8} {fmt_age(it.age_days):>6}  "
+                    scr.addnstr(y, 0, left.ljust(w), w - 1, attr | (C(2) if it in selected else 0))
+                    x = len(left)
+                    rest = (it.note[:40] + ("  " if it.note else "") + (("[" + ", ".join(marks) + "]") if marks else ""))
+                    if x < w - 1 and rest:
+                        scr.addnstr(y, x, rest, w - 1 - x, attr | (C(1) if marks else 0))
+            help_ = "↑↓/jk move  space select  a all-in-category  enter fold  d delete selected  q quit"
+            scr.addnstr(h - 2, 0, help_.ljust(w), w - 1, curses.A_DIM)
+            scr.addnstr(h - 1, 0, status.ljust(w), w - 1, C(1))
+            scr.refresh()
+
+        def confirm(chosen: list[Item]) -> bool:
+            h, w = scr.getmaxyx()
+            scr.erase()
+            total = sum(i.size for i in chosen)
+            scr.addnstr(0, 0, f" Move {len(chosen)} item(s), {human(total)}, to Trash? ".ljust(w), w - 1, curses.A_BOLD | C(3))
+            y = 2
+            warn: dict = {}
+            for it in chosen:
+                for wtext in warnings_for(it):
+                    warn.setdefault(wtext, []).append(it.name)
+            if warn:
+                scr.addnstr(y, 0, "Warnings:", w - 1, curses.A_BOLD | C(1)); y += 1
+                for wtext, names in warn.items():
+                    scr.addnstr(y, 0, f"  ! {wtext}  ({len(names)} item{'s' if len(names) > 1 else ''})", w - 1, C(1)); y += 1
+                    if y >= h - 6:
+                        break
+                y += 1
+            scr.addnstr(y, 0, "Items:", w - 1, curses.A_BOLD); y += 1
+            for n, it in enumerate(chosen):
+                if y >= h - 4:
+                    scr.addnstr(y, 0, f"  … and {len(chosen) - n} more", w - 1); y += 1
+                    break
+                nm = it.name if len(it.name) <= 40 else "…" + it.name[-39:]
+                scr.addnstr(y, 0, f"  {it.tool:<9}{nm:<40} {human(it.size):>8}  {it.path}", w - 1); y += 1
+            scr.addnstr(h - 2, 0, "Nothing is hard-deleted; a manifest lets you restore. Press y to confirm, any other key to cancel.".ljust(w), w - 1, curses.A_DIM)
+            scr.refresh()
+            return scr.getch() in (ord("y"), ord("Y"))
+
+        def perform(chosen: list[Item]):
+            stamp = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
+            dest_root = HOME / ".Trash" / f"skill-issue-{stamp}"
+            dest_root.mkdir(parents=True, exist_ok=True)
+            manifest, failed = [], []
+            for it in chosen:
+                src = Path(it.path)
+                dest = unique_dest(dest_root / it.tool / it.category / src.name)
+                try:
+                    shutil.move(str(src), str(dest))
+                    manifest.append({"from": str(src), "to": str(dest), "size": it.size})
+                except OSError as e:
+                    failed.append(f"{src}: {e}")
+            (dest_root / "manifest.json").write_text(json.dumps(manifest, indent=2))
+            for it in chosen:
+                if not Path(it.path).exists():
+                    for cat in by_tool[it.tool].values():
+                        if it in cat:
+                            cat.remove(it)
+            moved = human(sum(m["size"] for m in manifest))
+            return f"Moved {len(manifest)} item(s), {moved}, to {dest_root}" + (f"  FAILED: {len(failed)}" if failed else ""), failed
+
+        rows = build_rows()
+        while True:
+            cursor = max(0, min(cursor, len(rows) - 1))
+            draw(rows)
+            k = scr.getch()
+            row = rows[cursor] if rows else None
+            if k in (ord("q"), 27):
+                break
+            elif k in (curses.KEY_DOWN, ord("j")):
+                cursor += 1
+            elif k in (curses.KEY_UP, ord("k")):
+                cursor -= 1
+            elif k == curses.KEY_NPAGE:
+                cursor += scr.getmaxyx()[0] - 4
+            elif k == curses.KEY_PPAGE:
+                cursor -= scr.getmaxyx()[0] - 4
+            elif k == ord("g"):
+                cursor = 0
+            elif k == ord("G"):
+                cursor = len(rows) - 1
+            elif k == ord(" ") and row:
+                if row[0] == "item" and row[1].cleanable:
+                    selected.symmetric_difference_update({row[1]})
+                    cursor += 1
+                elif row[0] == "item":
+                    status = f"report-only: edit {row[1].path} to remove this"
+                elif row[0] == "cat":
+                    its = [i for i in row[3] if i.cleanable]
+                    if not its:
+                        status = "report-only category"
+                    elif all(i in selected for i in its):
+                        selected.difference_update(its)
+                    else:
+                        selected.update(its)
+            elif k == ord("a") and row and row[0] in ("cat", "item"):
+                tool, cat = (row[1], row[2]) if row[0] == "cat" else (row[1].tool, row[1].category)
+                its = [i for i in by_tool[tool][cat] if i.cleanable]
+                if not its:
+                    status = "report-only category"
+                elif all(i in selected for i in its):
+                    selected.difference_update(its)
+                else:
+                    selected.update(its)
+            elif k in (10, 13, curses.KEY_ENTER, curses.KEY_LEFT, curses.KEY_RIGHT) and row:
+                key = None
+                if row[0] == "cat":
+                    key = (row[1], row[2])
+                elif row[0] == "item":
+                    key = (row[1].tool, row[1].category)
+                if key:
+                    collapsed.symmetric_difference_update({key})
+                    rows = build_rows()
+                    if row[0] == "item":
+                        cursor = next(i for i, r in enumerate(rows) if r[0] == "cat" and (r[1], r[2]) == key)
+            elif k in (ord("d"), ord("D"), curses.KEY_DC):
+                chosen = [i for i in items if i in selected]
+                if not chosen:
+                    status = "nothing selected"
+                elif confirm(chosen):
+                    status, failed = perform(chosen)
+                    selected.clear()
+                    rows = build_rows()
+                else:
+                    status = "cancelled"
+            elif k == curses.KEY_RESIZE:
+                pass
+
+    curses.wrapper(run)
 
 # --------------------------------------------------------------------------- main
 SCANNERS = {
@@ -662,7 +910,7 @@ def collect(tools: Optional[list[str]], extra_projects: list[str], usage: bool) 
 
 def main(argv=None):
     ap = argparse.ArgumentParser(prog="skill-issue", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("command", nargs="?", default="scan", choices=["scan", "clean", "restore"])
+    ap.add_argument("command", nargs="?", default="scan", choices=["scan", "tui", "clean", "restore"])
     ap.add_argument("target", nargs="?", help="clean: category. restore: trash dir")
     ap.add_argument("--tool", action="append", choices=list(SCANNERS), help="limit to a tool (repeatable)")
     ap.add_argument("--category", action="append", choices=CATEGORIES, help="limit report to a category")
@@ -687,6 +935,10 @@ def main(argv=None):
     items = collect(a.tool, a.project, a.usage)
     if a.category:
         items = [i for i in items if i.category in a.category]
+
+    if a.command == "tui":
+        do_tui(items)
+        return
 
     if a.command == "clean":
         if not a.target:

@@ -42,7 +42,33 @@ python3 skill_issue.py --json                # machine-readable
 - `never used` / `used Nd ago`: from `--usage`, which greps Claude transcripts for Skill, Agent and MCP tool calls
 - `stale`: older than `--older-than`
 
-## Cleaning
+## Interactive picker
+
+```bash
+python3 skill_issue.py tui
+python3 skill_issue.py tui --tool codex --usage
+```
+
+A curses screen grouped by tool and category. Keys:
+
+| Key | Action |
+|---|---|
+| `↑` `↓` `j` `k` | move |
+| `space` | select / deselect an item, or every item in a category |
+| `a` | select / deselect everything in the current category |
+| `enter` | fold / unfold a category |
+| `d` | review and move the selection to Trash |
+| `q` | quit |
+
+Report-only categories (mcp, hooks, instructions, projects) are folded and
+cannot be selected; pressing space on one tells you which file to edit.
+Pressing `d` shows a confirmation screen that lists every item and the
+warnings that apply, for example transcripts that will lose resume history,
+sqlite files that need the app closed first, skills used in the last 30 days,
+or synced skills that will come back on the next sync. Nothing moves until you
+press `y`.
+
+## Cleaning from the command line
 
 ```bash
 python3 skill_issue.py clean sessions --tool codex --older-than 90
