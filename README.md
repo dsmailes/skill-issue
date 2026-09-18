@@ -74,6 +74,7 @@ press `y`.
 python3 skill_issue.py clean sessions --tool codex --older-than 90
 python3 skill_issue.py clean skills --tool claude            # interactive pick list
 python3 skill_issue.py clean caches --name generated_images -y
+python3 skill_issue.py clean sessions --tool codex --name 'sessions/2026/0[3-6]' -y
 python3 skill_issue.py restore ~/.Trash/skill-issue-20260918-130501
 ```
 

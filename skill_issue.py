@@ -730,6 +730,14 @@ def unique_dest(dest: Path) -> Path:
     return cand
 
 
+def name_match(it: Item, pattern: str) -> bool:
+    """Exact match on the item name or its last path segment; `*`/`?` globs
+    allowed. Substring matching was too easy to over-select with --yes."""
+    import fnmatch
+    base = it.name.split("/")[-1]
+    return any(fnmatch.fnmatchcase(x, pattern) for x in (it.name, base))
+
+
 def do_clean(items: list[Item], category: str, tool: Optional[str], older_than: Optional[int],
              names: list[str], yes: bool):
     if category not in CLEANABLE:
@@ -737,7 +745,7 @@ def do_clean(items: list[Item], category: str, tool: Optional[str], older_than: 
     cands = [i for i in items if i.category == category and i.cleanable
              and (tool is None or i.tool == tool)
              and (older_than is None or i.age_days >= older_than)
-             and (not names or any(n in i.name for n in names))]
+             and (not names or any(name_match(i, n) for n in names))]
     if not cands:
         print("Nothing matches.")
         return
@@ -1117,7 +1125,7 @@ def main(argv=None):
     ap.add_argument("--older-than", type=int, metavar="DAYS", help="flag/select items not modified in DAYS")
     ap.add_argument("--min-size", default="0", help="hide unflagged items smaller than this, e.g. 1M")
     ap.add_argument("--project", action="append", default=[], help="extra project dir to inspect")
-    ap.add_argument("--name", action="append", default=[], help="clean: substring filter on item name")
+    ap.add_argument("--name", action="append", default=[], help="clean: item name or glob, e.g. sessions/2026/0* (repeatable)")
     ap.add_argument("--usage", action="store_true", help="grep Claude transcripts for last use of skills/agents/mcp")
     ap.add_argument("--json", action="store_true")
     ap.add_argument("-y", "--yes", action="store_true", help="clean without prompting")
