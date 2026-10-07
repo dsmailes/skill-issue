@@ -9,9 +9,11 @@ It finds skills, plugins, agents, slash commands, instruction files such as
 and caches. It shows size, age and last use, flags anything broken or
 orphaned, and offers a terminal picker for clearing things out.
 
-> **Read the [disclaimer](#disclaimer) before cleaning anything.** This tool
-> moves files out of the folders your AI tools depend on. It is careful, but
-> it is not magic.
+> **Use at your own risk.** This tool moves files out of the folders your AI
+> tools depend on. It is careful, and everything it moves goes to the Trash
+> with a restore manifest, but it is not magic and it can still break a tool
+> setup or cost you conversation history. Read the [disclaimer](#disclaimer)
+> before cleaning anything. Running the audit on its own is read-only.
 
 ## Requirements
 
@@ -146,9 +148,10 @@ the report tells you which file to open instead.
 
 ## Disclaimer
 
-This tool moves files out of the configuration and cache directories of
-third-party software. Before you clean anything, understand what you are
-agreeing to:
+**This software is used entirely at your own risk.** It moves files out of
+the configuration and cache directories of third-party software. By running
+a clean you accept that you, not the author, are responsible for the
+outcome. Before you clean anything, understand what you are agreeing to:
 
 - **You are responsible for what you select.** The tool shows sizes, ages,
   descriptions and warnings to help you decide. It does not know which of
@@ -166,10 +169,12 @@ agreeing to:
 - **Paths change.** The agent vendors move files and formats between
   releases. The tool reads known locations as of September 2026 and may
   miss, or misclassify, newer ones.
-- **No warranty.** This is provided as-is under the MIT License. The author
-  accepts no liability for lost data, broken tool installations, or anything
-  else that follows from using it. Test on a machine you can afford to
-  restore.
+- **No warranty, no liability.** This is provided "as is" under the MIT
+  License, used at your own risk. The author accepts no liability for lost
+  data, lost conversation history, broken tool installations, or anything
+  else that follows from using it. If you can't afford to lose something,
+  back it up first. Time Machine or a copy of `~/.claude`, `~/.codex` and
+  friends is enough.
 
 This project is not affiliated with or endorsed by Anthropic, OpenAI,
 Google, Cursor, Codeium, or any other vendor whose files it reads.
