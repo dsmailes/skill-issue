@@ -27,7 +27,7 @@ orphaned, and offers a terminal picker for clearing things out.
 Clone the repository and run the script directly:
 
 ```bash
-git clone https://github.com/<you>/skill-issue.git
+git clone https://github.com/dsmailes/skill-issue.git
 cd skill-issue
 python3 skill_issue.py
 ```
