@@ -24,6 +24,19 @@ orphaned, and offers a terminal picker for clearing things out.
 
 ## Install
 
+### Homebrew
+
+```bash
+brew install dsmailes/tap/skill-issue
+skill-issue --version
+```
+
+This adds the [dsmailes/tap](https://github.com/dsmailes/homebrew-tap) tap
+and installs the latest release, with Python provided by Homebrew. Update
+with `brew upgrade skill-issue` and remove with `brew uninstall skill-issue`.
+
+### From source
+
 Clone the repository and run the script directly:
 
 ```bash
