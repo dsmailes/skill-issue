@@ -32,17 +32,26 @@ cd skill-issue
 python3 skill_issue.py
 ```
 
-To run it from anywhere as `skill-issue`, link it into a folder on your PATH:
+To run it from anywhere as `skill-issue`, link it into `~/.local/bin`, which
+you own, so no `sudo` is needed:
 
 ```bash
 chmod +x skill_issue.py
-ln -s "$(pwd)/skill_issue.py" /usr/local/bin/skill-issue
+mkdir -p ~/.local/bin
+ln -s "$(pwd)/skill_issue.py" ~/.local/bin/skill-issue
 ```
 
-If `/usr/local/bin` doesn't exist or isn't writable, use `~/.local/bin` and
-make sure it is on your PATH.
+If `skill-issue` then says "command not found", add that folder to your PATH
+and open a new terminal:
 
-To uninstall, delete the symlink and the cloned folder. The tool keeps no
+```bash
+echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zshrc
+```
+
+Avoid `/usr/local/bin`. On current macOS it is owned by root, and linking
+there fails with "Permission denied" unless you use `sudo`.
+
+To uninstall, delete `~/.local/bin/skill-issue` and the cloned folder. The tool keeps no
 state of its own outside the Trash folders it creates during a clean.
 
 ## Usage
