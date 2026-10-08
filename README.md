@@ -7,13 +7,27 @@ left on your Mac, and lets you move the dead weight to the Trash.
 It finds skills, plugins, agents, slash commands, instruction files such as
 `CLAUDE.md` and `AGENTS.md`, MCP server configs, hooks, session transcripts
 and caches. It shows size, age and last use, flags anything broken or
-orphaned, and offers a terminal picker for clearing things out.
+orphaned, and offers an interactive terminal screen, `skill-issue tui`, for clearing
+things out.
 
 > **Use at your own risk.** This tool moves files out of the folders your AI
 > tools depend on. It is careful, and everything it moves goes to the Trash
 > with a restore manifest, but it is not magic and it can still break a tool
 > setup or cost you conversation history. Read the [disclaimer](#disclaimer)
 > before cleaning anything. Running the audit on its own is read-only.
+
+## Quick start
+
+```bash
+skill-issue          # read-only report: what you have, sizes, ages, problems
+skill-issue tui      # interactive screen: pick items and move them to Trash
+```
+
+Plain `skill-issue` only prints a report and changes nothing. To actually
+clean things up, run **`skill-issue tui`**. It opens a full-screen picker where
+you tick items with `space`, press `d` to review the warnings, and press `y`
+to confirm. Nothing moves until you do. See [Interactive picker](#interactive-picker)
+for all the keys.
 
 ## Requirements
 
