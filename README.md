@@ -51,6 +51,32 @@ echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zshrc
 Avoid `/usr/local/bin`. On current macOS it is owned by root, and linking
 there fails with "Permission denied" unless you use `sudo`.
 
+### Install a pinned release
+
+Each release publishes a tarball and its SHA-256 on the
+[Releases page](https://github.com/dsmailes/skill-issue/releases). The
+archive contains one executable, `skill-issue`, so it can be dropped straight
+into `~/.local/bin` with no Homebrew and no `sudo`:
+
+```bash
+VERSION=0.1.0
+curl -fsSL -o /tmp/skill-issue.tgz \
+  "https://github.com/dsmailes/skill-issue/releases/download/v${VERSION}/skill-issue-v${VERSION}.tar.gz"
+tar xzf /tmp/skill-issue.tgz -C /tmp skill-issue
+install -m 0755 /tmp/skill-issue ~/.local/bin/skill-issue
+skill-issue --version
+```
+
+Compare `shasum -a 256 /tmp/skill-issue.tgz` against the `.sha256` file on the
+release page before installing if you want to pin it. `skill-issue --version`
+prints `skill-issue <version>`, which scripts can match against.
+
+The release needs `python3` on the target machine. macOS provides one once
+the Xcode Command Line Tools are installed.
+
+Maintainers: `scripts/build-release.sh` builds a reproducible tarball and
+checksum into `dist/`.
+
 To uninstall, delete `~/.local/bin/skill-issue` and the cloned folder. The tool keeps no
 state of its own outside the Trash folders it creates during a clean.
 

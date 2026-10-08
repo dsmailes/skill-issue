@@ -33,6 +33,8 @@ from dataclasses import dataclass, field, asdict
 from pathlib import Path
 from typing import Iterable, Optional
 
+__version__ = "0.1.0"
+
 HOME = Path.home()
 NOW = time.time()
 
@@ -1118,6 +1120,7 @@ def collect(tools: Optional[list[str]], extra_projects: list[str], usage: bool) 
 
 def main(argv=None):
     ap = argparse.ArgumentParser(prog="skill-issue", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--version", action="version", version=f"skill-issue {__version__}")
     ap.add_argument("command", nargs="?", default="scan", choices=["scan", "tui", "clean", "restore"])
     ap.add_argument("target", nargs="?", help="clean: category. restore: trash dir")
     ap.add_argument("--tool", action="append", choices=list(SCANNERS), help="limit to a tool (repeatable)")
